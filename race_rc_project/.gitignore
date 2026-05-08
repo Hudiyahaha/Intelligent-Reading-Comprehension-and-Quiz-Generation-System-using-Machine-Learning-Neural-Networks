@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+*.log
+data/raw/*.csv
+data/processed/
+models/model_a/traditional*/
+models/model_b/traditional*/
+models/model_a/neural/
+models/model_b/neural/
