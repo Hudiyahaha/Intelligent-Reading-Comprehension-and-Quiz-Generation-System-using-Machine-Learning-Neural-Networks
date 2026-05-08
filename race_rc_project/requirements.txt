@@ -9,6 +9,7 @@ tqdm>=4.66.0,<5
 pytest>=7.4.0,<10
 nltk>=3.8.1,<4
 rouge-score>=0.1.2,<1
+matplotlib>=3.7,<4
 
 # BERT comparison baseline (Model A / Model B rerank). Install torch from the
 # CPU index when no GPU is available:

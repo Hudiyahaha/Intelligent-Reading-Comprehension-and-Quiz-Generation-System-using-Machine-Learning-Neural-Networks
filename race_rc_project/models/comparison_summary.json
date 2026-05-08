@@ -1,0 +1,118 @@
+{
+  "tasks": {
+    "question_generation": {
+      "validation": {
+        "model_a": {
+          "n_examples": 2011,
+          "bleu_mean": 0.018564604843400535,
+          "rouge1_f_mean": 0.1776455935898894,
+          "rouge2_f_mean": 0.036021985694340466,
+          "rougeL_f_mean": 0.14479982165537328,
+          "meteor_mean": 0.20524910701431529
+        },
+        "bert": {
+          "n_examples": 2011,
+          "bleu_mean": 0.02250563596268058,
+          "rouge1_f_mean": 0.17596996413712468,
+          "rouge2_f_mean": 0.04676637841608582,
+          "rougeL_f_mean": 0.14694589181732434,
+          "meteor_mean": 0.22123450354748775
+        }
+      },
+      "test": {
+        "model_a": {
+          "n_examples": 5027,
+          "bleu_mean": 0.01800655231612463,
+          "rouge1_f_mean": 0.17850596261716517,
+          "rouge2_f_mean": 0.03504990359367291,
+          "rougeL_f_mean": 0.14454335622225925,
+          "meteor_mean": 0.20422135048586976
+        },
+        "bert": {
+          "n_examples": 5027,
+          "bleu_mean": 0.021797017306523468,
+          "rouge1_f_mean": 0.17233191201580794,
+          "rouge2_f_mean": 0.04489237758615231,
+          "rougeL_f_mean": 0.14348900140665938,
+          "meteor_mean": 0.2186452982127392
+        }
+      }
+    },
+    "distractor_generation": {
+      "validation": {
+        "model_b": {
+          "n_examples": 2011,
+          "bleu_mean": 0.013653325167022596,
+          "rouge1_f_mean": 0.025034204970294734,
+          "rouge2_f_mean": 0.0002451844622845296,
+          "rougeL_f_mean": 0.023613483380734414,
+          "meteor_mean": 0.08536168495865606
+        },
+        "bert": {
+          "n_examples": 2011,
+          "bleu_mean": 0.02049085378011508,
+          "rouge1_f_mean": 0.042967185975918136,
+          "rouge2_f_mean": 0.003645763793715697,
+          "rougeL_f_mean": 0.041060178586603505,
+          "meteor_mean": 0.10828134394963498
+        }
+      },
+      "test": {
+        "model_b": {
+          "n_examples": 5027,
+          "bleu_mean": 0.013773921022999023,
+          "rouge1_f_mean": 0.02752027937444426,
+          "rouge2_f_mean": 0.0007444421196892642,
+          "rougeL_f_mean": 0.02609340955400704,
+          "meteor_mean": 0.0859714325194009
+        },
+        "bert": {
+          "n_examples": 5027,
+          "bleu_mean": 0.02013324368271971,
+          "rouge1_f_mean": 0.044766845283863786,
+          "rouge2_f_mean": 0.0039310481611206675,
+          "rougeL_f_mean": 0.0427021692528665,
+          "meteor_mean": 0.10774786876053516
+        }
+      }
+    },
+    "hint_generation": {
+      "validation": {
+        "model_b": {
+          "n_examples": 2011,
+          "bleu_mean": 0.7170826067696746,
+          "rouge1_f_mean": 0.7967040461577951,
+          "rouge2_f_mean": 0.7346480197239129,
+          "rougeL_f_mean": 0.6728865618982967,
+          "meteor_mean": 0.7978418243888302
+        },
+        "bert": {
+          "n_examples": 2011,
+          "bleu_mean": 0.48308857914781295,
+          "rouge1_f_mean": 0.6073266178125055,
+          "rouge2_f_mean": 0.5012471287445067,
+          "rougeL_f_mean": 0.5171318254211278,
+          "meteor_mean": 0.6509071533892051
+        }
+      },
+      "test": {
+        "model_b": {
+          "n_examples": 5027,
+          "bleu_mean": 0.7050477746834432,
+          "rouge1_f_mean": 0.786189158650702,
+          "rouge2_f_mean": 0.7210699589834931,
+          "rougeL_f_mean": 0.6570375843363329,
+          "meteor_mean": 0.7885872997947801
+        },
+        "bert": {
+          "n_examples": 5027,
+          "bleu_mean": 0.4941214256864006,
+          "rouge1_f_mean": 0.6145302954817765,
+          "rouge2_f_mean": 0.5115828139097327,
+          "rougeL_f_mean": 0.5227168817231905,
+          "meteor_mean": 0.655454681476818
+        }
+      }
+    }
+  }
+}

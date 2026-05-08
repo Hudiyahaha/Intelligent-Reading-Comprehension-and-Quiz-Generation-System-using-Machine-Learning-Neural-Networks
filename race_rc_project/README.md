@@ -63,6 +63,30 @@ Outputs under `models/model_a/traditional/`:
 
 Inference: `from src.inference import ModelAInference` then `ModelAInference().generate_question(article, answer_text)`.
 
+### Model A — multi-classifier + soft-voting ensemble
+
+Trains three named classifiers on the same 12 candidate features (LR, Linear
+SVM with Platt calibration, Random Forest) and a soft-voting ensemble over
+the three. Per-classifier BLEU / ROUGE / METEOR is patched into Model A's
+`metrics_summary.json` under `classifiers` / `ensemble`:
+
+```bash
+python -m src.model_a_multiclf --max-val-mcq 2011 --max-test-mcq 5027
+```
+
+Artifacts saved alongside the legacy Model A files:
+`classifier_{lr,svm,rf,soft_vote}.joblib`, `classifier_scaler.joblib`,
+`multiclf_metrics.json`, and per-classifier prediction CSVs.
+
+### Clustering diagnostics
+
+Loads the saved Model A and Model B KMeans + scaler artifacts (no retraining)
+and writes silhouette score + cluster purity to each model's directory:
+
+```bash
+python -m src.clustering_eval --silhouette-sample 5000
+```
+
 ## Model B (traditional only)
 
 Model B trains two classical subsystems:

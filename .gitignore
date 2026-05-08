@@ -2,3 +2,13 @@
 *.csv
 __pycache__/
 .venv/
+
+# Large/regenerable model artifacts (re-create with the training CLIs).
+race_rc_project/models/**/*.joblib
+race_rc_project/models/**/*.pkl
+race_rc_project/models/**/*.pt
+race_rc_project/models/**/*.parquet
+
+# Course rubric (not part of the deliverable).
+AL2002_ProjectRubric.docx
+race_rc_project/RUBRIC_CHECKLIST.md

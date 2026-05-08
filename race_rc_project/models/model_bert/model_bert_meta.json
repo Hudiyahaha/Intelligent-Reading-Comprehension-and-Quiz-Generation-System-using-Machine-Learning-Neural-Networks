@@ -1,0 +1,42 @@
+{
+  "model_name": "bert-base-uncased",
+  "device": "cpu",
+  "hidden_size": 768,
+  "batch_size": 32,
+  "max_length": 128,
+  "generation_top_sentences": 3,
+  "top_distractors": 3,
+  "top_hints": 3,
+  "distractor_candidate_cap": 30,
+  "feature_columns": {
+    "question_generation": [
+      "sent_answer_overlap",
+      "sent_question_overlap",
+      "candidate_gold_similarity",
+      "candidate_len",
+      "sentence_len",
+      "has_blank",
+      "wh_what",
+      "wh_who",
+      "wh_where",
+      "wh_when",
+      "wh_why",
+      "candidate_rank"
+    ],
+    "distractor_generation": [
+      "freq_norm",
+      "len_token",
+      "answer_overlap",
+      "question_overlap",
+      "in_question",
+      "in_answer"
+    ],
+    "hint_generation": [
+      "q_overlap",
+      "a_overlap",
+      "qa_overlap",
+      "sent_len",
+      "pos_norm"
+    ]
+  }
+}

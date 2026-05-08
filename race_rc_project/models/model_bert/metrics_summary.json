@@ -1,0 +1,77 @@
+{
+  "model": "BERT rerank baseline (bert-base-uncased)",
+  "evaluation": "BLEU, ROUGE, METEOR vs reference text \u2014 same val/test MCQs as Model A & B.",
+  "config": {
+    "processed_dir": "data\\processed",
+    "output_dir": "models\\model_bert",
+    "model_name": "bert-base-uncased",
+    "device": "cpu",
+    "batch_size": 32,
+    "max_length": 128,
+    "generation_top_sentences": 3,
+    "top_distractors": 3,
+    "top_hints": 3,
+    "max_val_mcq": 2011,
+    "max_test_mcq": 5027,
+    "distractor_candidate_cap": 30,
+    "fp16": false
+  },
+  "timings": {
+    "model_load_seconds": 16.501636700006202,
+    "question_generation_seconds": 4891.2402612000005,
+    "distractor_generation_seconds": 399.71367860003375,
+    "hint_generation_seconds": 2361.3635311999824
+  },
+  "validation": {
+    "question_generation": {
+      "n_examples": 2011,
+      "bleu_mean": 0.02250563596268058,
+      "rouge1_f_mean": 0.17596996413712468,
+      "rouge2_f_mean": 0.04676637841608582,
+      "rougeL_f_mean": 0.14694589181732434,
+      "meteor_mean": 0.22123450354748775
+    },
+    "distractor_generation": {
+      "n_examples": 2011,
+      "bleu_mean": 0.02049085378011508,
+      "rouge1_f_mean": 0.042967185975918136,
+      "rouge2_f_mean": 0.003645763793715697,
+      "rougeL_f_mean": 0.041060178586603505,
+      "meteor_mean": 0.10828134394963498
+    },
+    "hint_generation": {
+      "n_examples": 2011,
+      "bleu_mean": 0.48308857914781295,
+      "rouge1_f_mean": 0.6073266178125055,
+      "rouge2_f_mean": 0.5012471287445067,
+      "rougeL_f_mean": 0.5171318254211278,
+      "meteor_mean": 0.6509071533892051
+    }
+  },
+  "test": {
+    "question_generation": {
+      "n_examples": 5027,
+      "bleu_mean": 0.021797017306523468,
+      "rouge1_f_mean": 0.17233191201580794,
+      "rouge2_f_mean": 0.04489237758615231,
+      "rougeL_f_mean": 0.14348900140665938,
+      "meteor_mean": 0.2186452982127392
+    },
+    "distractor_generation": {
+      "n_examples": 5027,
+      "bleu_mean": 0.02013324368271971,
+      "rouge1_f_mean": 0.044766845283863786,
+      "rouge2_f_mean": 0.0039310481611206675,
+      "rougeL_f_mean": 0.0427021692528665,
+      "meteor_mean": 0.10774786876053516
+    },
+    "hint_generation": {
+      "n_examples": 5027,
+      "bleu_mean": 0.4941214256864006,
+      "rouge1_f_mean": 0.6145302954817765,
+      "rouge2_f_mean": 0.5115828139097327,
+      "rougeL_f_mean": 0.5227168817231905,
+      "meteor_mean": 0.655454681476818
+    }
+  }
+}

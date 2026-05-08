@@ -183,11 +183,12 @@ def main() -> None:
         st.subheader("Screen 4: Developer / Analytics Dashboard")
         m_a = load_metrics_summary("models/model_a/traditional/metrics_summary.json")
         m_b = load_metrics_summary("models/model_b/traditional/metrics_summary.json")
+        m_bert = load_metrics_summary("models/model_bert/metrics_summary.json")
 
-        st.markdown("**Model Overview Metrics**")
-        c1, c2 = st.columns(2)
+        st.markdown("**Model Overview Metrics (test split)**")
+        c1, c2, c3 = st.columns(3)
         with c1:
-            st.write("Model A (Question Generation)")
+            st.write("Model A — Question Generation")
             if not m_a:
                 st.warning("Model A metrics file not found.")
             else:
@@ -196,8 +197,14 @@ def main() -> None:
                 st.metric("ROUGE-1", f"{t.get('rouge1_f_mean', 0):.4f}")
                 st.metric("ROUGE-L", f"{t.get('rougeL_f_mean', 0):.4f}")
                 st.metric("METEOR", f"{t.get('meteor_mean', 0):.4f}")
+                clust = m_a.get("clustering", {}).get("question_generation", {})
+                if clust:
+                    st.caption(
+                        f"KMeans silhouette: {clust.get('silhouette_score', 0):.3f}"
+                        f" · purity: {clust.get('purity', 0):.3f}"
+                    )
         with c2:
-            st.write("Model B (Distractor + Hint Generation)")
+            st.write("Model B — Distractor + Hint Generation")
             if not m_b:
                 st.warning("Model B metrics file not found.")
             else:
@@ -208,6 +215,36 @@ def main() -> None:
                 st.metric("Distractor ROUGE-1", f"{d.get('rouge1_f_mean', 0):.4f}")
                 st.metric("Hint BLEU", f"{h.get('bleu_mean', 0):.4f}")
                 st.metric("Hint METEOR", f"{h.get('meteor_mean', 0):.4f}")
+                clust_b = m_b.get("clustering", {})
+                if clust_b:
+                    d_clust = clust_b.get("distractor_generation", {})
+                    h_clust = clust_b.get("hint_generation", {})
+                    if d_clust:
+                        st.caption(
+                            f"Distractor KMeans silhouette: {d_clust.get('silhouette_score', 0):.3f}"
+                            f" · purity: {d_clust.get('purity', 0):.3f}"
+                        )
+                    if h_clust:
+                        st.caption(
+                            f"Hint KMeans silhouette: {h_clust.get('silhouette_score', 0):.3f}"
+                            f" · purity: {h_clust.get('purity', 0):.3f}"
+                        )
+        with c3:
+            st.write("BERT rerank baseline (same val/test)")
+            if not m_bert:
+                st.warning(
+                    "BERT metrics file not found. Run `python -m src.model_bert_train`."
+                )
+            else:
+                tbert = m_bert.get("test", {})
+                qg = tbert.get("question_generation", {})
+                dg = tbert.get("distractor_generation", {})
+                hg = tbert.get("hint_generation", {})
+                st.metric("Q-gen BLEU", f"{qg.get('bleu_mean', 0):.4f}")
+                st.metric("Distractor BLEU", f"{dg.get('bleu_mean', 0):.4f}")
+                st.metric("Hint BLEU", f"{hg.get('bleu_mean', 0):.4f}")
+                st.metric("Q-gen METEOR", f"{qg.get('meteor_mean', 0):.4f}")
+                st.caption(f"Encoder: {m_bert.get('config', {}).get('model_name', 'bert-base-uncased')}")
 
         st.markdown("---")
         events = pd.DataFrame(st.session_state["events"])
