@@ -63,8 +63,33 @@ Outputs under `models/model_a/traditional/`:
 
 Inference: `from src.inference import ModelAInference` then `ModelAInference().generate_question(article, answer_text)`.
 
+## Model B (traditional only)
+
+Model B trains two classical subsystems:
+
+- **Distractor generation**: supervised logistic ranker + KMeans scorer + ensemble, selecting top-3 distractor tokens.
+- **Hint generation**: supervised sentence ranker + KMeans scorer + ensemble, returning top-3 graduated hints.
+
+```bash
+python -m src.model_b_train --processed-dir data/processed --output-dir models/model_b/traditional
+```
+
+Useful options:
+
+- `--max-train-mcq 20000`
+- `--max-val-mcq 5000`
+- `--max-test-mcq 5000`
+- `--top-distractors 3`
+- `--top-hints 3`
+
+Outputs under `models/model_b/traditional/`:
+
+- `distractor_*.joblib`, `hint_*.joblib`, `model_b_meta.json`
+- `metrics_summary.json`
+- `distractor_*_predictions.csv`, `hint_*_predictions.csv`
+
+Inference: `from src.inference import ModelBInference` then `ModelBInference().generate(article, question, answer_text)`.
+
 ## Next steps
 
-- `src/model_b_train.py` — Model B training
-- `src/inference.py` — Model A generation helper (Model B pending)
-- `ui/app.py` — Streamlit UI
+- `ui/app.py` — Streamlit UI integrating Model A + Model B

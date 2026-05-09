@@ -1,4 +1,4 @@
-"""Inference for Model A (classical generation: supervised + unsupervised ensemble)."""
+"""Inference for Model A and Model B (traditional pipelines)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,15 @@ from src.model_a_train import (
     _token_set,
     _unsupervised_scores,
     _minmax_by_group,
+)
+from src.model_b_train import (
+    DISTRACTOR_FEATS,
+    HINT_FEATS,
+    _jaccard as _jaccard_b,
+    _make_hints,
+    _split_sentences as _split_sentences_b,
+    _token_set as _token_set_b,
+    _tokenize,
 )
 
 
@@ -87,8 +96,86 @@ class ModelAInference:
         }
 
 
+class ModelBInference:
+    """Generate distractors and hints for a question-answer pair."""
+
+    def __init__(self, model_dir: Path | str = Path("models/model_b/traditional")) -> None:
+        self.model_dir = Path(model_dir)
+        self.d_sup = joblib.load(self.model_dir / "distractor_supervised.joblib")
+        self.d_km = joblib.load(self.model_dir / "distractor_kmeans.joblib")
+        self.d_scaler = joblib.load(self.model_dir / "distractor_scaler.joblib")
+        self.h_sup = joblib.load(self.model_dir / "hint_supervised.joblib")
+        self.h_km = joblib.load(self.model_dir / "hint_kmeans.joblib")
+        self.h_scaler = joblib.load(self.model_dir / "hint_scaler.joblib")
+        meta = json.loads((self.model_dir / "model_b_meta.json").read_text(encoding="utf-8"))
+        self.w = float(meta.get("ensemble_weight_supervised", 0.5))
+        self.top_d = int(meta.get("top_distractors", 3))
+        self.top_h = int(meta.get("top_hints", 3))
+        self.d_good = int(meta.get("distractor_good_cluster_id", 0))
+        self.h_good = int(meta.get("hint_good_cluster_id", 0))
+
+    def generate(self, article: str, question: str, answer_text: str) -> dict:
+        # Distractor ranking
+        qset = _token_set_b(question)
+        aset = _token_set_b(answer_text)
+        toks = [t for t in _tokenize(article) if len(t) > 2 and t not in aset]
+        uniq, counts = np.unique(np.array(toks), return_counts=True) if toks else (np.array([]), np.array([]))
+        d_rows = []
+        maxc = int(counts.max()) if len(counts) else 1
+        for tok, c in zip(uniq.tolist(), counts.tolist()):
+            d_rows.append(
+                {
+                    "candidate": tok,
+                    "freq_norm": float(c) / max(1, maxc),
+                    "len_token": float(len(tok)),
+                    "answer_overlap": 1.0 if tok in aset else 0.0,
+                    "question_overlap": 1.0 if tok in qset else 0.0,
+                    "in_question": 1.0 if tok in qset else 0.0,
+                    "in_answer": 1.0 if tok in aset else 0.0,
+                }
+            )
+        distractors: list[str] = []
+        if d_rows:
+            cands = pd.DataFrame(d_rows)
+            X = cands[DISTRACTOR_FEATS].to_numpy(dtype=np.float32)
+            s_sup = self.d_sup.predict_proba(X)[:, 1]
+            Z = self.d_scaler.transform(X)
+            s_uns = _unsupervised_scores(Z, self.d_km, self.d_good)
+            cands["score"] = self.w * s_sup + (1.0 - self.w) * s_uns
+            distractors = cands.sort_values("score", ascending=False)["candidate"].head(self.top_d).tolist()
+
+        # Hint ranking
+        h_rows = []
+        sents = _split_sentences_b(article)
+        for i, sent in enumerate(sents):
+            qov = _jaccard_b(sent, question)
+            aov = _jaccard_b(sent, answer_text)
+            h_rows.append(
+                {
+                    "sentence": sent,
+                    "q_overlap": qov,
+                    "a_overlap": aov,
+                    "qa_overlap": 0.6 * aov + 0.4 * qov,
+                    "sent_len": float(len(_token_set_b(sent))),
+                    "pos_norm": float(i) / max(1, len(sents) - 1),
+                }
+            )
+        hints: list[str] = []
+        if h_rows:
+            hdf = pd.DataFrame(h_rows)
+            Xh = hdf[HINT_FEATS].to_numpy(dtype=np.float32)
+            hs_sup = self.h_sup.predict_proba(Xh)[:, 1]
+            Zh = self.h_scaler.transform(Xh)
+            hs_uns = _unsupervised_scores(Zh, self.h_km, self.h_good)
+            hdf["score"] = self.w * hs_sup + (1.0 - self.w) * hs_uns
+            top_sents = hdf.sort_values("score", ascending=False)["sentence"].head(self.top_h).tolist()
+            hints = _make_hints(top_sents, self.top_h)
+
+        return {"distractors": distractors, "hints": hints}
+
+
 def run_pipeline(*_args, **_kwargs):
-    raise NotImplementedError("Model B pipeline is pending; use ModelAInference for Model A.")
+    raise NotImplementedError("Use ModelAInference / ModelBInference directly.")
 
 
 if __name__ == "__main__":
