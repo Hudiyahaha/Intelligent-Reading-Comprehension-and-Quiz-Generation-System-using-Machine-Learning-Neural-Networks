@@ -1,157 +1,62 @@
 """
-Model A training pipeline.
+Model A — classical (non-neural) question generation from a passage.
 
-Implements the *answer verification* sub-task from the project spec:
-given (article, question, option) -> predict if option is correct (0/1).
+Components (per updated project brief):
+- Supervised: logistic ranker over template-generated candidates
+- Unsupervised: KMeans on candidate features; score by proximity to the "high-quality" cluster
+- Ensemble: convex combination of normalized supervised and unsupervised scores
 
-Also includes:
-- Required supervised baselines (LogReg, Linear SVM, Naive Bayes, RF)
-- Unsupervised experiment (KMeans on handcrafted features)
-- Semi-supervised experiment (Label Spreading on handcrafted features)
-- Simple soft-voting ensemble over probabilistic models
+Evaluation (generation): BLEU, ROUGE, METEOR vs reference question text (no accuracy/precision reporting).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-import re
 
 import joblib
 import numpy as np
 import pandas as pd
-from scipy import sparse
+from nltk import word_tokenize
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from nltk.translate.meteor_score import meteor_score
+from rouge_score import rouge_scorer
 from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-    silhouette_score,
-)
-from sklearn.naive_bayes import BernoulliNB
 from sklearn.preprocessing import StandardScaler
-from sklearn.semi_supervised import LabelSpreading
-from sklearn.svm import LinearSVC
+
+warnings.filterwarnings("ignore", category=UserWarning, module="nltk")
 
 
 @dataclass
 class TrainConfig:
     processed_dir: Path = Path("data/processed")
     output_dir: Path = Path("models/model_a/traditional")
-    sparse_feature_kind: str = "ohe"  # ohe or tfidf
-    use_handcrafted: bool = True
-    max_train_rows: int | None = None
     random_seed: int = 42
-    run_unsupervised: bool = True
-    run_semi_supervised: bool = True
-    semi_supervised_label_frac: float = 0.10
-    run_generation: bool = True
     generation_top_sentences: int = 3
-    generation_max_train_mcq: int | None = 20000
-
-
-def _load_manifest(processed_dir: Path) -> dict:
-    path = processed_dir / "manifest.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing manifest file: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _load_split(processed_dir: Path, split: str, sparse_feature_kind: str) -> tuple[pd.DataFrame, sparse.csr_matrix]:
-    table_path = processed_dir / f"verify_{split}.parquet"
-    matrix_path = processed_dir / f"verify_{split}_X_{sparse_feature_kind}.npz"
-    if not table_path.is_file():
-        raise FileNotFoundError(f"Missing split table: {table_path}")
-    if not matrix_path.is_file():
-        raise FileNotFoundError(
-            f"Missing sparse feature matrix: {matrix_path}. "
-            f"Did you run preprocessing with this feature kind?"
-        )
-    df = pd.read_parquet(table_path)
-    X = sparse.load_npz(matrix_path).tocsr()
-    return df, X
-
-
-def _load_mcq_split(processed_dir: Path, split: str) -> pd.DataFrame:
-    path = processed_dir / f"mcq_{split}.parquet"
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing MCQ split file: {path}")
-    return pd.read_parquet(path)
-
-
-def _extract_xy(
-    df: pd.DataFrame,
-    X_sparse: sparse.csr_matrix,
-    handcrafted_cols: list[str],
-    use_handcrafted: bool,
-) -> tuple[sparse.csr_matrix, np.ndarray]:
-    y = df["label"].to_numpy().astype(np.int8)
-    if not use_handcrafted:
-        return X_sparse, y
-    dense_handcrafted = df[handcrafted_cols].to_numpy(dtype=np.float32)
-    X_dense_sparse = sparse.csr_matrix(dense_handcrafted)
-    X = sparse.hstack([X_sparse, X_dense_sparse], format="csr")
-    return X, y
-
-
-def _basic_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    return {
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
-        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
-        "exact_match": float(np.mean(y_true == y_pred)),
-        "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
-    }
-
-
-def _fit_and_eval_model(
-    name: str,
-    model,
-    X_train: sparse.csr_matrix,
-    y_train: np.ndarray,
-    X_val: sparse.csr_matrix,
-    y_val: np.ndarray,
-    X_test: sparse.csr_matrix,
-    y_test: np.ndarray,
-) -> tuple[dict, object]:
-    t0 = perf_counter()
-    model.fit(X_train, y_train)
-    train_seconds = perf_counter() - t0
-
-    val_pred = model.predict(X_val)
-    test_pred = model.predict(X_test)
-    return (
-        {
-            "model_name": name,
-            "train_seconds": train_seconds,
-            "validation": _basic_metrics(y_val, val_pred),
-            "test": _basic_metrics(y_test, test_pred),
-        },
-        model,
-    )
-
-
-def _cluster_purity(y_true: np.ndarray, clusters: np.ndarray) -> float:
-    total = 0
-    for c in np.unique(clusters):
-        idx = np.where(clusters == c)[0]
-        if len(idx) == 0:
-            continue
-        labels = y_true[idx]
-        counts = np.bincount(labels, minlength=2)
-        total += counts.max()
-    return float(total / len(y_true))
+    generation_max_train_mcq: int | None = None
+    generation_max_val_mcq: int | None = None
+    generation_max_test_mcq: int | None = None
+    ensemble_weight_supervised: float = 0.5
+    max_eval_mcq: int | None = None
 
 
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _ensure_nltk() -> None:
+    import nltk
+
+    for pkg in ("punkt", "punkt_tab", "wordnet", "omw-1.4"):
+        try:
+            nltk.download(pkg, quiet=True)
+        except Exception:
+            pass
 
 
 def _normalize_text(s: str) -> str:
@@ -177,7 +82,10 @@ def _guess_wh_word(answer: str) -> str:
         return "who"
     if re.search(r"\b(city|country|school|park|street|place|room|home)\b", a):
         return "where"
-    if re.search(r"\b(\d{4}|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)\b", a):
+    if re.search(
+        r"\b(\d{4}|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)\b",
+        a,
+    ):
         return "when"
     if re.search(r"\b(because|reason|cause)\b", a):
         return "why"
@@ -204,7 +112,30 @@ def _template_question(sentence: str, answer: str, wh_word: str) -> tuple[str, i
     return f"{wh_word.capitalize()} is best supported by this statement: {sent}?", 0
 
 
-def _build_generation_candidates(mcq_df: pd.DataFrame, top_sentences: int) -> pd.DataFrame:
+def _load_mcq_split(processed_dir: Path, split: str) -> pd.DataFrame:
+    path = processed_dir / f"mcq_{split}.parquet"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing MCQ split file: {path}")
+    return pd.read_parquet(path)
+
+
+GENERATION_FEAT_COLS = [
+    "sent_answer_overlap",
+    "sent_question_overlap",
+    "candidate_gold_similarity",
+    "candidate_len",
+    "sentence_len",
+    "has_blank",
+    "wh_what",
+    "wh_who",
+    "wh_where",
+    "wh_when",
+    "wh_why",
+    "candidate_rank",
+]
+
+
+def build_generation_candidates(mcq_df: pd.DataFrame, top_sentences: int) -> pd.DataFrame:
     records: list[dict] = []
     for idx, row in mcq_df.reset_index(drop=True).iterrows():
         answer_letter = str(row["answer"]).strip().upper()
@@ -253,298 +184,248 @@ def _build_generation_candidates(mcq_df: pd.DataFrame, top_sentences: int) -> pd
     return cands
 
 
-def _run_generation_training(
-    cfg: TrainConfig,
-    train_mcq: pd.DataFrame,
-    val_mcq: pd.DataFrame,
-    test_mcq: pd.DataFrame,
-) -> dict:
-    if cfg.generation_max_train_mcq is not None:
-        n = min(cfg.generation_max_train_mcq, len(train_mcq))
-        train_mcq = train_mcq.iloc[:n].reset_index(drop=True)
+def _minmax_by_group(scores: np.ndarray, group_ids: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(scores, dtype=np.float64)
+    for g in np.unique(group_ids):
+        m = group_ids == g
+        s = scores[m]
+        lo, hi = float(s.min()), float(s.max())
+        if hi - lo < 1e-12:
+            out[m] = 1.0
+        else:
+            out[m] = (s - lo) / (hi - lo)
+    return out
 
-    train_cands = _build_generation_candidates(train_mcq, cfg.generation_top_sentences)
-    val_cands = _build_generation_candidates(val_mcq, cfg.generation_top_sentences)
-    test_cands = _build_generation_candidates(test_mcq, cfg.generation_top_sentences)
 
-    if train_cands.empty or val_cands.empty or test_cands.empty:
-        return {"status": "skipped", "reason": "No generation candidates were produced."}
+def _fit_unsupervised(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    random_seed: int,
+) -> tuple[KMeans, StandardScaler, int]:
+    scaler = StandardScaler()
+    Z = scaler.fit_transform(X_train)
+    km = KMeans(n_clusters=2, random_state=random_seed, n_init=10)
+    clusters = km.fit_predict(Z)
+    quality = []
+    for c in (0, 1):
+        m = clusters == c
+        quality.append(float(y_train[m].mean()) if m.any() else 0.0)
+    good_cluster = int(np.argmax(quality))
+    return km, scaler, good_cluster
 
-    feat_cols = [
-        "sent_answer_overlap",
-        "sent_question_overlap",
-        "candidate_gold_similarity",
-        "candidate_len",
-        "sentence_len",
-        "has_blank",
-        "wh_what",
-        "wh_who",
-        "wh_where",
-        "wh_when",
-        "wh_why",
-        "candidate_rank",
-    ]
-    X_train = train_cands[feat_cols].to_numpy(dtype=np.float32)
-    y_train = train_cands["label"].to_numpy(dtype=np.int8)
-    X_val = val_cands[feat_cols].to_numpy(dtype=np.float32)
-    X_test = test_cands[feat_cols].to_numpy(dtype=np.float32)
 
-    ranker = LogisticRegression(
-        solver="liblinear",
-        max_iter=400,
-        random_state=cfg.random_seed,
-    )
-    ranker.fit(X_train, y_train)
-    joblib.dump(ranker, cfg.output_dir / "generation_ranker.joblib")
-    (cfg.output_dir / "generation_feature_columns.json").write_text(json.dumps(feat_cols, indent=2), encoding="utf-8")
+def _unsupervised_scores(Z: np.ndarray, km: KMeans, good_cluster: int) -> np.ndarray:
+    centroid = km.cluster_centers_[good_cluster]
+    dist = np.linalg.norm(Z - centroid, axis=1)
+    return 1.0 / (1.0 + dist)
 
-    def top1_accuracy(cands: pd.DataFrame, probs: np.ndarray) -> float:
-        tmp = cands.copy()
-        tmp["score"] = probs
-        pred_best = tmp.groupby("mcq_row_id")["score"].idxmax()
-        true_best = tmp.groupby("mcq_row_id")["label"].idxmax()
-        return float(np.mean(pred_best.to_numpy() == true_best.to_numpy()))
 
-    val_probs = ranker.predict_proba(X_val)[:, 1]
-    test_probs = ranker.predict_proba(X_test)[:, 1]
-    val_top1 = top1_accuracy(val_cands, val_probs)
-    test_top1 = top1_accuracy(test_cands, test_probs)
+def _bleu(ref: str, hyp: str) -> float:
+    ref_t = word_tokenize(ref.lower())
+    hyp_t = word_tokenize(hyp.lower())
+    if not hyp_t:
+        return 0.0
+    smooth = SmoothingFunction().method1
+    return float(sentence_bleu([ref_t], hyp_t, smoothing_function=smooth))
 
-    # Save a quick qualitative sample for reporting/demo.
-    sample = val_cands.copy()
-    sample["score"] = val_probs
-    sample = sample.sort_values(["mcq_row_id", "score"], ascending=[True, False]).groupby("mcq_row_id").head(1)
-    sample[["id", "gold_question", "candidate_question", "score"]].head(30).to_csv(
-        cfg.output_dir / "generation_preview.csv", index=False
-    )
 
+def _rouge_agg(ref: str, hyp: str, scorer: rouge_scorer.RougeScorer) -> dict[str, float]:
+    if not ref.strip() or not hyp.strip():
+        return {"rouge1_f": 0.0, "rouge2_f": 0.0, "rougeL_f": 0.0}
+    r = scorer.score(ref, hyp)
     return {
-        "status": "ok",
-        "train_candidates": int(len(train_cands)),
-        "validation_candidates": int(len(val_cands)),
-        "test_candidates": int(len(test_cands)),
-        "top1_accuracy_validation": val_top1,
-        "top1_accuracy_test": test_top1,
-        "feature_columns": feat_cols,
+        "rouge1_f": float(r["rouge1"].fmeasure),
+        "rouge2_f": float(r["rouge2"].fmeasure),
+        "rougeL_f": float(r["rougeL"].fmeasure),
     }
 
 
-def run_training(cfg: TrainConfig) -> None:
-    manifest = _load_manifest(cfg.processed_dir)
-    handcrafted_cols: list[str] = manifest["handcrafted_feature_columns"]
+def _meteor(ref: str, hyp: str) -> float:
+    ref_t = word_tokenize(ref.lower())
+    hyp_t = word_tokenize(hyp.lower())
+    if not ref_t or not hyp_t:
+        return 0.0
+    return float(meteor_score([ref_t], hyp_t))
 
-    train_df, train_sparse = _load_split(cfg.processed_dir, "train", cfg.sparse_feature_kind)
-    val_df, val_sparse = _load_split(cfg.processed_dir, "validation", cfg.sparse_feature_kind)
-    test_df, test_sparse = _load_split(cfg.processed_dir, "test", cfg.sparse_feature_kind)
+
+def _evaluate_generation(
+    cands: pd.DataFrame,
+    ensemble_score: np.ndarray,
+    rouge_s: rouge_scorer.RougeScorer,
+) -> tuple[dict, pd.DataFrame]:
+    tmp = cands.copy()
+    tmp["_ens"] = ensemble_score
+    picked = tmp.sort_values(["mcq_row_id", "_ens"], ascending=[True, False]).groupby("mcq_row_id").head(1)
+
+    rows = []
+    bleu_vals, met_vals = [], []
+    r1, r2, rl = [], [], []
+    for _, r in picked.iterrows():
+        ref_q = str(r["gold_question"])
+        hyp_q = str(r["candidate_question"])
+        b = _bleu(ref_q, hyp_q)
+        rg = _rouge_agg(ref_q, hyp_q, rouge_s)
+        m = _meteor(ref_q, hyp_q)
+        bleu_vals.append(b)
+        met_vals.append(m)
+        r1.append(rg["rouge1_f"])
+        r2.append(rg["rouge2_f"])
+        rl.append(rg["rougeL_f"])
+        rows.append(
+            {
+                "id": r["id"],
+                "gold_question": ref_q,
+                "predicted_question": hyp_q,
+                "bleu": b,
+                "rouge1_f": rg["rouge1_f"],
+                "rouge2_f": rg["rouge2_f"],
+                "rougeL_f": rg["rougeL_f"],
+                "meteor": m,
+            }
+        )
+
+    detail = pd.DataFrame(rows)
+    agg = {
+        "n_examples": int(len(detail)),
+        "bleu_mean": float(np.mean(bleu_vals)) if bleu_vals else 0.0,
+        "rouge1_f_mean": float(np.mean(r1)) if r1 else 0.0,
+        "rouge2_f_mean": float(np.mean(r2)) if r2 else 0.0,
+        "rougeL_f_mean": float(np.mean(rl)) if rl else 0.0,
+        "meteor_mean": float(np.mean(met_vals)) if met_vals else 0.0,
+    }
+    return agg, detail
+
+
+def run_training(cfg: TrainConfig) -> None:
+    _ensure_nltk()
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+
     train_mcq = _load_mcq_split(cfg.processed_dir, "train")
     val_mcq = _load_mcq_split(cfg.processed_dir, "validation")
     test_mcq = _load_mcq_split(cfg.processed_dir, "test")
 
-    if cfg.max_train_rows is not None:
-        n = min(cfg.max_train_rows, len(train_df))
-        train_df = train_df.iloc[:n].reset_index(drop=True)
-        train_sparse = train_sparse[:n]
+    if cfg.generation_max_train_mcq is not None:
+        n = min(cfg.generation_max_train_mcq, len(train_mcq))
+        train_mcq = train_mcq.iloc[:n].reset_index(drop=True)
+    if cfg.generation_max_val_mcq is not None:
+        n = min(cfg.generation_max_val_mcq, len(val_mcq))
+        val_mcq = val_mcq.iloc[:n].reset_index(drop=True)
+    if cfg.generation_max_test_mcq is not None:
+        n = min(cfg.generation_max_test_mcq, len(test_mcq))
+        test_mcq = test_mcq.iloc[:n].reset_index(drop=True)
 
-    X_train, y_train = _extract_xy(train_df, train_sparse, handcrafted_cols, cfg.use_handcrafted)
-    X_val, y_val = _extract_xy(val_df, val_sparse, handcrafted_cols, cfg.use_handcrafted)
-    X_test, y_test = _extract_xy(test_df, test_sparse, handcrafted_cols, cfg.use_handcrafted)
+    train_cands = build_generation_candidates(train_mcq, cfg.generation_top_sentences)
+    val_cands = build_generation_candidates(val_mcq, cfg.generation_top_sentences)
+    test_cands = build_generation_candidates(test_mcq, cfg.generation_top_sentences)
 
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    if train_cands.empty or val_cands.empty or test_cands.empty:
+        raise RuntimeError("No generation candidates produced. Check MCQ parquet and article text.")
 
-    models = {
-        "logistic_regression": LogisticRegression(
-            solver="saga",
-            max_iter=300,
-            n_jobs=-1,
-            random_state=cfg.random_seed,
-        ),
-        "linear_svm": LinearSVC(
-            C=1.0,
-            random_state=cfg.random_seed,
-        ),
-        "bernoulli_nb": BernoulliNB(),
-    }
+    X_train = train_cands[GENERATION_FEAT_COLS].to_numpy(dtype=np.float32)
+    y_train = train_cands["label"].to_numpy(dtype=np.int8)
+    X_val = val_cands[GENERATION_FEAT_COLS].to_numpy(dtype=np.float32)
+    X_test = test_cands[GENERATION_FEAT_COLS].to_numpy(dtype=np.float32)
 
-    # RF is trained only on handcrafted features for speed/stability.
-    rf_uses_handcrafted = True
-    rf = RandomForestClassifier(
-        n_estimators=250,
-        max_depth=20,
-        min_samples_leaf=2,
-        n_jobs=-1,
-        random_state=cfg.random_seed,
+    t0 = perf_counter()
+    ranker = LogisticRegression(solver="liblinear", max_iter=500, random_state=cfg.random_seed)
+    ranker.fit(X_train, y_train)
+    sup_train_sec = perf_counter() - t0
+
+    km, scaler, good_cluster = _fit_unsupervised(X_train, y_train, cfg.random_seed)
+
+    joblib.dump(ranker, cfg.output_dir / "generation_supervised.joblib")
+    joblib.dump(km, cfg.output_dir / "generation_kmeans.joblib")
+    joblib.dump(scaler, cfg.output_dir / "generation_unsupervised_scaler.joblib")
+    (cfg.output_dir / "generation_feature_columns.json").write_text(
+        json.dumps(GENERATION_FEAT_COLS, indent=2), encoding="utf-8"
     )
 
-    all_results: dict[str, dict] = {}
-    trained_models: dict[str, object] = {}
+    w = float(cfg.ensemble_weight_supervised)
+    w = max(0.0, min(1.0, w))
 
-    for name, model in models.items():
-        result, fitted = _fit_and_eval_model(
-            name,
-            model,
-            X_train,
-            y_train,
-            X_val,
-            y_val,
-            X_test,
-            y_test,
-        )
-        all_results[name] = result
-        trained_models[name] = fitted
-        joblib.dump(fitted, cfg.output_dir / f"{name}.joblib")
+    def ensemble_scores(cands: pd.DataFrame, X: np.ndarray) -> np.ndarray:
+        p_sup = ranker.predict_proba(X)[:, 1]
+        Z = scaler.transform(X)
+        raw_u = _unsupervised_scores(Z, km, good_cluster)
+        gids = cands["mcq_row_id"].to_numpy()
+        sup_n = _minmax_by_group(p_sup, gids)
+        uns_n = _minmax_by_group(raw_u, gids)
+        return w * sup_n + (1.0 - w) * uns_n
 
-    if rf_uses_handcrafted:
-        Xh_train = train_df[handcrafted_cols].to_numpy(dtype=np.float32)
-        Xh_val = val_df[handcrafted_cols].to_numpy(dtype=np.float32)
-        Xh_test = test_df[handcrafted_cols].to_numpy(dtype=np.float32)
-        rf_result, rf_fitted = _fit_and_eval_model(
-            "random_forest_handcrafted",
-            rf,
-            sparse.csr_matrix(Xh_train),
-            y_train,
-            sparse.csr_matrix(Xh_val),
-            y_val,
-            sparse.csr_matrix(Xh_test),
-            y_test,
-        )
-        all_results["random_forest_handcrafted"] = rf_result
-        trained_models["random_forest_handcrafted"] = rf_fitted
-        joblib.dump(rf_fitted, cfg.output_dir / "random_forest_handcrafted.joblib")
+    ens_val = ensemble_scores(val_cands, X_val)
+    ens_test = ensemble_scores(test_cands, X_test)
 
-    # Soft-voting ensemble over probabilistic models.
-    ensemble_members = []
-    for k in ("logistic_regression", "bernoulli_nb"):
-        m = trained_models.get(k)
-        if m is not None and hasattr(m, "predict_proba"):
-            ensemble_members.append(k)
-    if ensemble_members:
-        val_probs = np.mean(
-            [trained_models[k].predict_proba(X_val)[:, 1] for k in ensemble_members],  # type: ignore[attr-defined]
-            axis=0,
-        )
-        test_probs = np.mean(
-            [trained_models[k].predict_proba(X_test)[:, 1] for k in ensemble_members],  # type: ignore[attr-defined]
-            axis=0,
-        )
-        val_pred = (val_probs >= 0.5).astype(np.int8)
-        test_pred = (test_probs >= 0.5).astype(np.int8)
-        all_results["soft_voting_ensemble"] = {
-            "model_name": "soft_voting_ensemble",
-            "members": ensemble_members,
-            "validation": _basic_metrics(y_val, val_pred),
-            "test": _basic_metrics(y_test, test_pred),
-        }
+    rouge_s = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
 
-    # Unsupervised and semi-supervised on handcrafted features (dense, scalable).
-    Xh_train = train_df[handcrafted_cols].to_numpy(dtype=np.float32)
-    Xh_val = val_df[handcrafted_cols].to_numpy(dtype=np.float32)
-    Xh_test = test_df[handcrafted_cols].to_numpy(dtype=np.float32)
-    scaler = StandardScaler()
-    Xh_train_scaled = scaler.fit_transform(Xh_train)
-    Xh_val_scaled = scaler.transform(Xh_val)
-    Xh_test_scaled = scaler.transform(Xh_test)
-    joblib.dump(scaler, cfg.output_dir / "handcrafted_scaler.joblib")
+    val_metrics, val_detail = _evaluate_generation(val_cands, ens_val, rouge_s)
+    test_metrics, test_detail = _evaluate_generation(test_cands, ens_test, rouge_s)
 
-    if cfg.run_unsupervised:
-        km = KMeans(n_clusters=2, random_state=cfg.random_seed, n_init=10)
-        train_clusters = km.fit_predict(Xh_train_scaled)
-        val_clusters = km.predict(Xh_val_scaled)
-        test_clusters = km.predict(Xh_test_scaled)
-        joblib.dump(km, cfg.output_dir / "kmeans.joblib")
-        all_results["kmeans_unsupervised"] = {
-            "model_name": "kmeans_unsupervised",
-            "train_silhouette": float(silhouette_score(Xh_train_scaled, train_clusters)),
-            "train_purity": _cluster_purity(y_train, train_clusters),
-            "validation_purity": _cluster_purity(y_val, val_clusters),
-            "test_purity": _cluster_purity(y_test, test_clusters),
-        }
+    val_out, test_out = val_detail, test_detail
+    if cfg.max_eval_mcq is not None:
+        val_out = val_detail.head(cfg.max_eval_mcq)
+        test_out = test_detail.head(cfg.max_eval_mcq)
+    val_out.to_csv(cfg.output_dir / "generation_val_predictions.csv", index=False)
+    test_out.to_csv(cfg.output_dir / "generation_test_predictions.csv", index=False)
 
-    if cfg.run_semi_supervised:
-        rng = np.random.default_rng(cfg.random_seed)
-        y_semi = y_train.copy().astype(int)
-        keep = rng.random(len(y_semi)) < cfg.semi_supervised_label_frac
-        y_semi[~keep] = -1
-        semi = LabelSpreading(kernel="knn", n_neighbors=10, alpha=0.2, max_iter=30)
-        semi.fit(Xh_train_scaled, y_semi)
-        val_pred = semi.predict(Xh_val_scaled)
-        test_pred = semi.predict(Xh_test_scaled)
-        joblib.dump(semi, cfg.output_dir / "label_spreading.joblib")
-        all_results["label_spreading_semi_supervised"] = {
-            "model_name": "label_spreading_semi_supervised",
-            "labeled_fraction": float(cfg.semi_supervised_label_frac),
-            "validation": _basic_metrics(y_val, val_pred),
-            "test": _basic_metrics(y_test, test_pred),
-        }
+    meta = {
+        "ensemble_weight_supervised": w,
+        "good_kmeans_cluster_id": good_cluster,
+        "generation_top_sentences": cfg.generation_top_sentences,
+        "generation_max_train_mcq": cfg.generation_max_train_mcq,
+        "feature_columns": GENERATION_FEAT_COLS,
+        "supervised_train_seconds": sup_train_sec,
+        "train_candidates": int(len(train_cands)),
+    }
+    (cfg.output_dir / "model_a_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    generation_results = None
-    if cfg.run_generation:
-        generation_results = _run_generation_training(cfg, train_mcq, val_mcq, test_mcq)
-
-    # Save run metadata + metrics.
     summary = {
+        "model": "Model A (traditional only)",
+        "evaluation": "BLEU, ROUGE, METEOR vs reference question (no classification metrics)",
         "config": {
             "processed_dir": str(cfg.processed_dir),
             "output_dir": str(cfg.output_dir),
-            "sparse_feature_kind": cfg.sparse_feature_kind,
-            "use_handcrafted": cfg.use_handcrafted,
-            "max_train_rows": cfg.max_train_rows,
             "random_seed": cfg.random_seed,
-            "run_unsupervised": cfg.run_unsupervised,
-            "run_semi_supervised": cfg.run_semi_supervised,
-            "semi_supervised_label_frac": cfg.semi_supervised_label_frac,
-            "run_generation": cfg.run_generation,
             "generation_top_sentences": cfg.generation_top_sentences,
             "generation_max_train_mcq": cfg.generation_max_train_mcq,
+            "generation_max_val_mcq": cfg.generation_max_val_mcq,
+            "generation_max_test_mcq": cfg.generation_max_test_mcq,
+            "ensemble_weight_supervised": w,
         },
-        "split_rows": {
-            "train": int(len(train_df)),
-            "validation": int(len(val_df)),
-            "test": int(len(test_df)),
+        "validation": val_metrics,
+        "test": test_metrics,
+        "artifacts": {
+            "supervised": str(cfg.output_dir / "generation_supervised.joblib"),
+            "kmeans": str(cfg.output_dir / "generation_kmeans.joblib"),
+            "scaler": str(cfg.output_dir / "generation_unsupervised_scaler.joblib"),
+            "meta": str(cfg.output_dir / "model_a_meta.json"),
         },
-        "results": all_results,
     }
-    if generation_results is not None:
-        summary["generation"] = generation_results
-    (cfg.output_dir / "metrics_summary.json").write_text(
-        json.dumps(summary, indent=2),
-        encoding="utf-8",
-    )
+    (cfg.output_dir / "metrics_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Train Model A answer verification baselines.")
+    p = argparse.ArgumentParser(description="Train Model A: classical question generation + BLEU/ROUGE/METEOR.")
     p.add_argument("--processed-dir", type=Path, default=Path("data/processed"))
     p.add_argument("--output-dir", type=Path, default=Path("models/model_a/traditional"))
-    p.add_argument(
-        "--sparse-feature-kind",
-        choices=("ohe", "tfidf"),
-        default="ohe",
-        help="Which sparse feature matrix to use from preprocessing outputs.",
-    )
-    p.add_argument("--no-handcrafted", action="store_true", help="Disable handcrafted lexical features.")
-    p.add_argument("--max-train-rows", type=int, default=None, help="Debug mode: limit training rows.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--skip-unsupervised", action="store_true")
-    p.add_argument("--skip-semi-supervised", action="store_true")
-    p.add_argument("--semi-label-frac", type=float, default=0.10)
-    p.add_argument("--skip-generation", action="store_true")
     p.add_argument("--generation-top-sentences", type=int, default=3)
-    p.add_argument("--generation-max-train-mcq", type=int, default=20000)
+    p.add_argument("--generation-max-train-mcq", type=int, default=None)
+    p.add_argument("--generation-max-val-mcq", type=int, default=None)
+    p.add_argument("--generation-max-test-mcq", type=int, default=None)
+    p.add_argument("--ensemble-weight-supervised", type=float, default=0.5)
+    p.add_argument("--max-eval-mcq", type=int, default=None, help="Cap rows written to prediction CSVs.")
     args = p.parse_args()
 
     cfg = TrainConfig(
         processed_dir=args.processed_dir,
         output_dir=args.output_dir,
-        sparse_feature_kind=args.sparse_feature_kind,
-        use_handcrafted=not args.no_handcrafted,
-        max_train_rows=args.max_train_rows,
         random_seed=args.seed,
-        run_unsupervised=not args.skip_unsupervised,
-        run_semi_supervised=not args.skip_semi_supervised,
-        semi_supervised_label_frac=args.semi_label_frac,
-        run_generation=not args.skip_generation,
         generation_top_sentences=args.generation_top_sentences,
         generation_max_train_mcq=args.generation_max_train_mcq,
+        generation_max_val_mcq=args.generation_max_val_mcq,
+        generation_max_test_mcq=args.generation_max_test_mcq,
+        ensemble_weight_supervised=args.ensemble_weight_supervised,
+        max_eval_mcq=args.max_eval_mcq,
     )
     run_training(cfg)
 

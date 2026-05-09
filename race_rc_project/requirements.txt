@@ -7,6 +7,8 @@ joblib>=1.3.0,<2
 pyarrow>=14.0.0,<22
 tqdm>=4.66.0,<5
 pytest>=7.4.0,<10
+nltk>=3.8.1,<4
+rouge-score>=0.1.2,<1
 
 # UI & notebooks (install when needed)
 streamlit>=1.28.0,<2

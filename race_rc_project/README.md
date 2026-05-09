@@ -23,28 +23,17 @@ python -m src.preprocessing --raw-dir data/raw --processed-dir data/processed
 
 Options: `--max-ohe-features 50000`, `--max-tfidf-features 50000`, `--no-tfidf`, `--sample-train N` (debug).
 
-## Next steps
+## Model A (traditional only)
 
-- `src/model_a_train.py` — Model A (answer verification) training
-- `src/model_b_train.py` — Model B training
-- `src/inference.py` — unified inference API
-- `ui/app.py` — Streamlit UI
+**No neural models.** Pipeline:
 
-## Model A training (Colab / VSCode notebooks)
+1. Template-based candidate questions from the passage (top sentences by overlap with the gold answer).
+2. **Supervised:** `LogisticRegression` ranker (trained on candidate features; proxy label = candidate closest to reference question).
+3. **Unsupervised:** `KMeans` on standardized candidate features; “good” cluster chosen on train; score = proximity to that centroid.
+4. **Ensemble:** per-MCQ min–max normalization, then  
+   `w * supervised + (1 - w) * unsupervised` (default `w = 0.5`).
 
-Model A now implements:
-
-- **Verification**: given `(article, question, option)` predict `label in {0,1}`
-- **Template-based question generation + ML ranking**: generate candidate questions from top answer-relevant sentences and rank them with a trained logistic ranker
-
-It trains:
-
-- Supervised baselines: Logistic Regression, Linear SVM, BernoulliNB, RandomForest
-- Ensemble: soft voting over probabilistic models
-- Unsupervised: KMeans purity/silhouette on handcrafted features
-- Semi-supervised: Label Spreading
-
-Run:
+**Evaluation (reporting):** mean **BLEU**, **ROUGE-1/2/L (F1)**, **METEOR** between generated question and reference question (no accuracy/precision for this stage).
 
 ```bash
 python -m src.model_a_train --processed-dir data/processed --output-dir models/model_a/traditional
@@ -52,18 +41,22 @@ python -m src.model_a_train --processed-dir data/processed --output-dir models/m
 
 Useful options:
 
-- `--sparse-feature-kind ohe|tfidf`
-- `--max-train-rows 20000` (faster debug)
-- `--skip-unsupervised`
-- `--skip-semi-supervised`
-- `--skip-generation`
 - `--generation-top-sentences 3`
-- `--generation-max-train-mcq 20000`
+- `--generation-max-train-mcq 20000` (limit train MCQs for speed)
+- `--generation-max-val-mcq 5000` / `--generation-max-test-mcq 5000` (optional debug limits)
+- `--ensemble-weight-supervised 0.5`
+- `--max-eval-mcq 5000` (only limits rows in exported prediction CSVs; metrics use full val/test)
 
-Main output:
+Outputs under `models/model_a/traditional/`:
 
-- `models/model_a/traditional/*.joblib`
-- `models/model_a/traditional/metrics_summary.json`
-- `models/model_a/traditional/generation_ranker.joblib`
-- `models/model_a/traditional/generation_feature_columns.json`
-- `models/model_a/traditional/generation_preview.csv`
+- `generation_supervised.joblib`, `generation_kmeans.joblib`, `generation_unsupervised_scaler.joblib`
+- `model_a_meta.json`, `generation_feature_columns.json`
+- `metrics_summary.json`, `generation_*_predictions.csv`
+
+Inference: `from src.inference import ModelAInference` then `ModelAInference().generate_question(article, answer_text)`.
+
+## Next steps
+
+- `src/model_b_train.py` — Model B training
+- `src/inference.py` — Model A generation helper (Model B pending)
+- `ui/app.py` — Streamlit UI
