@@ -34,6 +34,11 @@ class PreprocessConfig:
     ngram_max: int = 1
     build_tfidf: bool = True
     random_seed: int = 42
+    # If True: merge all CSVs in raw_dir, dedupe by id, shuffle, then split (see train_fraction / val_fraction_of_train_pool).
+    combined_split: bool = False
+    train_fraction: float = 0.8
+    # Fraction of the *training pool* (first train_fraction of rows) held out as validation.
+    val_fraction_of_train_pool: float = 0.1
 
 
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
@@ -88,6 +93,88 @@ def load_raw_splits(raw_dir: Path) -> dict[str, pd.DataFrame]:
         "validation": load_race_csv(val_path),
         "test": load_race_csv(test_path),
     }
+
+
+def load_raw_splits_combined(
+    raw_dir: Path,
+    train_fraction: float,
+    val_fraction_of_train_pool: float,
+    random_seed: int,
+) -> tuple[dict[str, pd.DataFrame], dict]:
+    """
+    Merge every RACE-style CSV present in raw_dir, drop duplicate `id`, shuffle once,
+    then split into train / validation / test.
+
+    - First ``train_fraction`` of rows becomes the *training pool*.
+    - From that pool, the first ``val_fraction_of_train_pool`` fraction is validation;
+      the remainder is train (used to fit vectorizers).
+    - The remaining ``1 - train_fraction`` of rows is the test split.
+
+    Example defaults (0.8 / 0.1): roughly 72% train, 8% validation, 20% test of unique rows.
+    """
+    raw_dir = Path(raw_dir)
+    parts: list[pd.DataFrame] = []
+    for fname in ("train.csv", "test.csv", "dev.csv", "val.csv"):
+        p = raw_dir / fname
+        if p.is_file():
+            parts.append(load_race_csv(p))
+    if not parts:
+        raise FileNotFoundError(f"No CSVs found in {raw_dir}")
+    pool = pd.concat(parts, ignore_index=True)
+    before = len(pool)
+    pool = pool.drop_duplicates(subset=["id"], keep="first")
+    after = len(pool)
+    pool = pool.sample(frac=1.0, random_state=random_seed).reset_index(drop=True)
+
+    tf = float(train_fraction)
+    if not 0.0 < tf < 1.0:
+        raise ValueError("train_fraction must be between 0 and 1")
+    vf = float(val_fraction_of_train_pool)
+    if not 0.0 <= vf < 1.0:
+        raise ValueError("val_fraction_of_train_pool must be in [0, 1)")
+
+    n = len(pool)
+    cut = int(round(n * tf))
+    train_pool = pool.iloc[:cut].reset_index(drop=True)
+    test_df = pool.iloc[cut:].reset_index(drop=True)
+
+    if len(train_pool) == 0 or len(test_df) == 0:
+        raise ValueError(
+            "Combined split produced an empty train or test split; check train_fraction and data size."
+        )
+
+    n_val = int(round(len(train_pool) * vf))
+    if vf > 0 and n_val == 0 and len(train_pool) > 1:
+        n_val = 1
+    n_val = min(n_val, len(train_pool) - 1) if vf > 0 and len(train_pool) > 1 else 0
+    val_df = train_pool.iloc[:n_val].reset_index(drop=True)
+    train_df = train_pool.iloc[n_val:].reset_index(drop=True)
+
+    if len(train_df) == 0:
+        raise ValueError(
+            "No training rows left after validation holdout; lower val_fraction_of_train_pool."
+        )
+    if len(val_df) == 0:
+        raise ValueError(
+            "Validation split is empty. Increase --val-fraction-of-train-pool (e.g. 0.1)."
+        )
+
+    stats = {
+        "combined_split": True,
+        "rows_before_dedupe": int(before),
+        "rows_after_dedupe": int(after),
+        "duplicates_dropped": int(before - after),
+        "train_fraction": tf,
+        "val_fraction_of_train_pool": vf,
+    }
+    return (
+        {
+            "train": train_df,
+            "validation": val_df,
+            "test": test_df,
+        },
+        stats,
+    )
 
 
 def clean_mcq_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -265,7 +352,16 @@ def run_preprocessing(
     artifacts_dir = processed_dir / "artifacts"
     config = config or PreprocessConfig()
 
-    splits = load_raw_splits(raw_dir)
+    split_extra: dict = {"combined_split": False}
+    if config.combined_split:
+        splits, split_extra = load_raw_splits_combined(
+            raw_dir,
+            config.train_fraction,
+            config.val_fraction_of_train_pool,
+            config.random_seed,
+        )
+    else:
+        splits = load_raw_splits(raw_dir)
     if sample_train is not None:
         splits["train"] = splits["train"].sample(
             n=min(sample_train, len(splits["train"])),
@@ -308,6 +404,7 @@ def run_preprocessing(
 
     manifest = {
         "config": asdict(config),
+        "split_info": split_extra,
         "splits": {k: int(len(v)) for k, v in verify_splits.items()},
         "mcq_splits": {k: int(len(v)) for k, v in mcq_splits.items()},
         "ohe_feature_dim": int(X_ohe["train"].shape[1]),
@@ -333,6 +430,23 @@ def main(argv: Iterable[str] | None = None) -> None:
     p.add_argument("--ngram-max", type=int, default=1)
     p.add_argument("--no-tfidf", action="store_true")
     p.add_argument("--sample-train", type=int, default=None, help="Use only N train MCQs (debug).")
+    p.add_argument(
+        "--combined-split",
+        action="store_true",
+        help="Merge train/test/dev CSVs, dedupe by id, shuffle, then split (see --train-fraction).",
+    )
+    p.add_argument(
+        "--train-fraction",
+        type=float,
+        default=0.8,
+        help="With --combined-split: fraction of unique rows for train+val pool (rest is test).",
+    )
+    p.add_argument(
+        "--val-fraction-of-train-pool",
+        type=float,
+        default=0.1,
+        help="With --combined-split: validation fraction taken from the start of the train pool.",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     cfg = PreprocessConfig(
@@ -342,6 +456,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         min_df=args.min_df,
         ngram_max=args.ngram_max,
         build_tfidf=not args.no_tfidf,
+        combined_split=args.combined_split,
+        train_fraction=args.train_fraction,
+        val_fraction_of_train_pool=args.val_fraction_of_train_pool,
     )
     run_preprocessing(args.raw_dir, args.processed_dir, cfg, sample_train=args.sample_train)
 

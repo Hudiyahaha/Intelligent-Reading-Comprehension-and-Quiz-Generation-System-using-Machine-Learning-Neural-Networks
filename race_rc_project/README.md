@@ -13,12 +13,20 @@ pip install -r requirements.txt
 
 Place RACE CSV splits in `data/raw/` as `train.csv`, `test.csv`, and `dev.csv` (or `val.csv`).
 
+If your **train and test files are duplicates** (or you want one shuffled split), use **`--combined-split`**: all CSVs present are merged, **deduplicated by `id`**, shuffled, then split so roughly **`train_fraction`** of unique rows form the train+validation pool and the rest are **test**. From that pool, **`val_fraction_of_train_pool`** is taken as validation (default **0.8 / 0.1** → about **72% train, 8% validation, 20% test**).
+
 ## Preprocessing
 
 Builds cleaned tables, verification (long) labels, one-hot–style sparse features (binary `CountVectorizer`), optional TF–IDF, handcrafted lexical features, and cosine-similarity scalars. Fitted vectorizers are stored under `data/processed/artifacts/` (fit on **train** only).
 
 ```bash
 python -m src.preprocessing --raw-dir data/raw --processed-dir data/processed
+```
+
+Duplicate-safe split example:
+
+```bash
+python -m src.preprocessing --raw-dir data/raw --processed-dir data/processed --combined-split --train-fraction 0.8 --val-fraction-of-train-pool 0.1
 ```
 
 Options: `--max-ohe-features 50000`, `--max-tfidf-features 50000`, `--no-tfidf`, `--sample-train N` (debug).
