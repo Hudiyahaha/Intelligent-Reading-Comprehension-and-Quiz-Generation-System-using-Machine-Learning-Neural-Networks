@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import time
 from pathlib import Path
@@ -30,6 +31,14 @@ def load_samples() -> pd.DataFrame:
         if p.is_file():
             return pd.read_parquet(p)
     raise FileNotFoundError("No mcq_*.parquet found. Run preprocessing first.")
+
+
+@st.cache_data
+def load_metrics_summary(path: str) -> dict | None:
+    p = Path(path)
+    if not p.is_file():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def _init_state() -> None:
@@ -172,6 +181,35 @@ def main() -> None:
 
     with tabs[3]:
         st.subheader("Screen 4: Developer / Analytics Dashboard")
+        m_a = load_metrics_summary("models/model_a/traditional/metrics_summary.json")
+        m_b = load_metrics_summary("models/model_b/traditional/metrics_summary.json")
+
+        st.markdown("**Model Overview Metrics**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("Model A (Question Generation)")
+            if not m_a:
+                st.warning("Model A metrics file not found.")
+            else:
+                t = m_a.get("test", {})
+                st.metric("BLEU", f"{t.get('bleu_mean', 0):.4f}")
+                st.metric("ROUGE-1", f"{t.get('rouge1_f_mean', 0):.4f}")
+                st.metric("ROUGE-L", f"{t.get('rougeL_f_mean', 0):.4f}")
+                st.metric("METEOR", f"{t.get('meteor_mean', 0):.4f}")
+        with c2:
+            st.write("Model B (Distractor + Hint Generation)")
+            if not m_b:
+                st.warning("Model B metrics file not found.")
+            else:
+                tb = m_b.get("test", {})
+                d = tb.get("distractor_generation", {})
+                h = tb.get("hint_generation", {})
+                st.metric("Distractor BLEU", f"{d.get('bleu_mean', 0):.4f}")
+                st.metric("Distractor ROUGE-1", f"{d.get('rouge1_f_mean', 0):.4f}")
+                st.metric("Hint BLEU", f"{h.get('bleu_mean', 0):.4f}")
+                st.metric("Hint METEOR", f"{h.get('meteor_mean', 0):.4f}")
+
+        st.markdown("---")
         events = pd.DataFrame(st.session_state["events"])
         if events.empty:
             st.info("No interaction logs yet.")

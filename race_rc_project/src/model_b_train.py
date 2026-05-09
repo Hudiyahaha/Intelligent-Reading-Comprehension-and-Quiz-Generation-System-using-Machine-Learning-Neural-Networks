@@ -17,17 +17,24 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from time import perf_counter
 
 import joblib
 import numpy as np
 import pandas as pd
+from nltk import word_tokenize
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from nltk.translate.meteor_score import meteor_score
+from rouge_score import rouge_scorer
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+
+warnings.filterwarnings("ignore", category=UserWarning, module="nltk")
 
 OPTION_COLS = ("A", "B", "C", "D")
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -45,6 +52,16 @@ class TrainConfig:
     max_val_mcq: int | None = None
     max_test_mcq: int | None = None
     ensemble_weight_supervised: float = 0.5
+
+
+def _ensure_nltk() -> None:
+    import nltk
+
+    for pkg in ("punkt", "punkt_tab", "wordnet", "omw-1.4"):
+        try:
+            nltk.download(pkg, quiet=True)
+        except Exception:
+            pass
 
 
 def _normalize_text(s: str) -> str:
@@ -173,31 +190,59 @@ def _build_distractor_candidates(mcq: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _evaluate_distractors(pred_df: pd.DataFrame, top_k: int) -> dict:
-    """
-    Proxy evaluation: compare predicted token distractors against tokenized gold wrong options.
-    """
-    p_vals, r_vals, f_vals = [], [], []
+def _bleu(ref: str, hyp: str) -> float:
+    ref_t = word_tokenize(ref.lower())
+    hyp_t = word_tokenize(hyp.lower())
+    if not hyp_t:
+        return 0.0
+    smooth = SmoothingFunction().method1
+    return float(sentence_bleu([ref_t], hyp_t, smoothing_function=smooth))
+
+
+def _meteor(ref: str, hyp: str) -> float:
+    ref_t = word_tokenize(ref.lower())
+    hyp_t = word_tokenize(hyp.lower())
+    if not ref_t or not hyp_t:
+        return 0.0
+    return float(meteor_score([ref_t], hyp_t))
+
+
+def _rouge_agg(ref: str, hyp: str, scorer: rouge_scorer.RougeScorer) -> dict[str, float]:
+    if not ref.strip() or not hyp.strip():
+        return {"rouge1_f": 0.0, "rouge2_f": 0.0, "rougeL_f": 0.0}
+    r = scorer.score(ref, hyp)
+    return {
+        "rouge1_f": float(r["rouge1"].fmeasure),
+        "rouge2_f": float(r["rouge2"].fmeasure),
+        "rougeL_f": float(r["rougeL"].fmeasure),
+    }
+
+
+def _evaluate_text_generation(
+    pred_df: pd.DataFrame,
+    pred_col: str,
+    ref_col: str,
+    rouge_s: rouge_scorer.RougeScorer,
+) -> dict:
+    bleu_vals, meteor_vals, r1, r2, rl = [], [], [], [], []
     for _, r in pred_df.iterrows():
-        pred = [p for p in r["pred_distractors"] if p]
-        gold_tokens = set()
-        for w in r["gold_wrong_options"]:
-            gold_tokens |= _token_set(str(w))
-        gold_tokens -= _token_set(str(r["answer_text"]))
-        pred_set = set(pred)
-        tp = len(pred_set & gold_tokens)
-        p = tp / max(1, len(pred_set))
-        rec = tp / max(1, len(gold_tokens))
-        f1 = 0.0 if (p + rec) == 0 else (2 * p * rec) / (p + rec)
-        p_vals.append(p)
-        r_vals.append(rec)
-        f_vals.append(f1)
+        pred = str(r[pred_col]).strip()
+        ref = str(r[ref_col]).strip()
+        b = _bleu(ref, pred)
+        m = _meteor(ref, pred)
+        rg = _rouge_agg(ref, pred, rouge_s)
+        bleu_vals.append(b)
+        meteor_vals.append(m)
+        r1.append(rg["rouge1_f"])
+        r2.append(rg["rouge2_f"])
+        rl.append(rg["rougeL_f"])
     return {
         "n_examples": int(len(pred_df)),
-        "top_k": int(top_k),
-        "precision_mean": float(np.mean(p_vals)) if p_vals else 0.0,
-        "recall_mean": float(np.mean(r_vals)) if r_vals else 0.0,
-        "f1_mean": float(np.mean(f_vals)) if f_vals else 0.0,
+        "bleu_mean": float(np.mean(bleu_vals)) if bleu_vals else 0.0,
+        "rouge1_f_mean": float(np.mean(r1)) if r1 else 0.0,
+        "rouge2_f_mean": float(np.mean(r2)) if r2 else 0.0,
+        "rougeL_f_mean": float(np.mean(rl)) if rl else 0.0,
+        "meteor_mean": float(np.mean(meteor_vals)) if meteor_vals else 0.0,
     }
 
 
@@ -262,27 +307,8 @@ def _make_hints(sentences: list[str], top_k: int) -> list[str]:
     return [picked[-1], picked[len(picked) // 2], picked[0]][:top_k]
 
 
-def _evaluate_hints(pred_df: pd.DataFrame) -> dict:
-    """
-    Proxy quality: best hint overlap with answer and question (higher is better).
-    """
-    qa_scores = []
-    for _, r in pred_df.iterrows():
-        q = str(r["question"])
-        a = str(r["answer_text"])
-        hints: list[str] = r["pred_hints"]
-        if not hints:
-            qa_scores.append(0.0)
-            continue
-        vals = [0.6 * _jaccard(h, a) + 0.4 * _jaccard(h, q) for h in hints]
-        qa_scores.append(max(vals))
-    return {
-        "n_examples": int(len(pred_df)),
-        "hint_relevance_mean": float(np.mean(qa_scores)) if qa_scores else 0.0,
-    }
-
-
 def run_training(cfg: TrainConfig) -> None:
+    _ensure_nltk()
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     train_mcq = _limit(_load_mcq_split(cfg.processed_dir, "train"), cfg.max_train_mcq)
     val_mcq = _limit(_load_mcq_split(cfg.processed_dir, "validation"), cfg.max_val_mcq)
@@ -300,9 +326,11 @@ def run_training(cfg: TrainConfig) -> None:
     Xva = va_d[DISTRACTOR_FEATS].to_numpy(dtype=np.float32)
     Xte = te_d[DISTRACTOR_FEATS].to_numpy(dtype=np.float32)
 
+    t0 = perf_counter()
     d_sup = LogisticRegression(solver="liblinear", max_iter=400, random_state=cfg.random_seed)
     d_sup.fit(Xtr, ytr)
     d_km, d_scaler, d_good = _fit_unsupervised(Xtr, ytr, cfg.random_seed)
+    d_train_sec = perf_counter() - t0
 
     joblib.dump(d_sup, cfg.output_dir / "distractor_supervised.joblib")
     joblib.dump(d_km, cfg.output_dir / "distractor_kmeans.joblib")
@@ -334,6 +362,8 @@ def run_training(cfg: TrainConfig) -> None:
                     "answer_text": g.iloc[0]["answer_text"],
                     "gold_wrong_options": g.iloc[0]["gold_wrong_options"],
                     "pred_distractors": unique,
+                    "pred_distractors_text": " ; ".join(unique),
+                    "ref_distractors_text": " ; ".join([str(x) for x in g.iloc[0]["gold_wrong_options"] if str(x).strip()]),
                 }
             )
         return pd.DataFrame(pred_rows)
@@ -342,8 +372,9 @@ def run_training(cfg: TrainConfig) -> None:
     test_pred_d = _rank_distr(te_d, Xte)
     val_pred_d.to_csv(cfg.output_dir / "distractor_val_predictions.csv", index=False)
     test_pred_d.to_csv(cfg.output_dir / "distractor_test_predictions.csv", index=False)
-    val_d_metrics = _evaluate_distractors(val_pred_d, cfg.top_distractors)
-    test_d_metrics = _evaluate_distractors(test_pred_d, cfg.top_distractors)
+    rouge_s = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+    val_d_metrics = _evaluate_text_generation(val_pred_d, "pred_distractors_text", "ref_distractors_text", rouge_s)
+    test_d_metrics = _evaluate_text_generation(test_pred_d, "pred_distractors_text", "ref_distractors_text", rouge_s)
 
     # ---------------- Hints ----------------
     tr_h = _build_hint_candidates(train_mcq)
@@ -357,9 +388,11 @@ def run_training(cfg: TrainConfig) -> None:
     Xvah = va_h[HINT_FEATS].to_numpy(dtype=np.float32)
     Xteh = te_h[HINT_FEATS].to_numpy(dtype=np.float32)
 
+    t0 = perf_counter()
     h_sup = LogisticRegression(solver="liblinear", max_iter=400, random_state=cfg.random_seed)
     h_sup.fit(Xtrh, ytrh)
     h_km, h_scaler, h_good = _fit_unsupervised(Xtrh, ytrh, cfg.random_seed)
+    h_train_sec = perf_counter() - t0
 
     joblib.dump(h_sup, cfg.output_dir / "hint_supervised.joblib")
     joblib.dump(h_km, cfg.output_dir / "hint_kmeans.joblib")
@@ -383,6 +416,11 @@ def run_training(cfg: TrainConfig) -> None:
                     "question": g.iloc[0]["question"],
                     "answer_text": g.iloc[0]["answer_text"],
                     "pred_hints": _make_hints(top_sents, cfg.top_hints),
+                    "pred_hints_text": " ; ".join(_make_hints(top_sents, cfg.top_hints)),
+                    "ref_hints_text": " ; ".join(_make_hints(
+                        g.sort_values("qa_overlap", ascending=False)["sentence"].head(cfg.top_hints).tolist(),
+                        cfg.top_hints,
+                    )),
                 }
             )
         return pd.DataFrame(pred_rows)
@@ -391,8 +429,8 @@ def run_training(cfg: TrainConfig) -> None:
     test_pred_h = _rank_hints(te_h, Xteh)
     val_pred_h.to_csv(cfg.output_dir / "hint_val_predictions.csv", index=False)
     test_pred_h.to_csv(cfg.output_dir / "hint_test_predictions.csv", index=False)
-    val_h_metrics = _evaluate_hints(val_pred_h)
-    test_h_metrics = _evaluate_hints(test_pred_h)
+    val_h_metrics = _evaluate_text_generation(val_pred_h, "pred_hints_text", "ref_hints_text", rouge_s)
+    test_h_metrics = _evaluate_text_generation(test_pred_h, "pred_hints_text", "ref_hints_text", rouge_s)
 
     meta = {
         "ensemble_weight_supervised": w,
@@ -402,6 +440,8 @@ def run_training(cfg: TrainConfig) -> None:
         "hint_good_cluster_id": int(h_good),
         "distractor_features": DISTRACTOR_FEATS,
         "hint_features": HINT_FEATS,
+        "distractor_train_seconds": d_train_sec,
+        "hint_train_seconds": h_train_sec,
     }
     (cfg.output_dir / "model_b_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -419,12 +459,12 @@ def run_training(cfg: TrainConfig) -> None:
             "ensemble_weight_supervised": w,
         },
         "validation": {
-            "distractor": val_d_metrics,
-            "hint": val_h_metrics,
+            "distractor_generation": val_d_metrics,
+            "hint_generation": val_h_metrics,
         },
         "test": {
-            "distractor": test_d_metrics,
-            "hint": test_h_metrics,
+            "distractor_generation": test_d_metrics,
+            "hint_generation": test_h_metrics,
         },
         "artifacts": {
             "distractor_supervised": str(cfg.output_dir / "distractor_supervised.joblib"),
