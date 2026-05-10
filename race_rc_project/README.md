@@ -90,6 +90,55 @@ Outputs under `models/model_b/traditional/`:
 
 Inference: `from src.inference import ModelBInference` then `ModelBInference().generate(article, question, answer_text)`.
 
+## BERT comparison baseline
+
+`src/model_bert_train.py` is a reranker baseline that reuses the **same**
+candidate generation that Model A and Model B build (template questions,
+article-token distractors, article-sentence hints) and replaces the classical
+LogisticRegression + KMeans ensemble scorer with mean-pooled BERT embeddings
+(default: `bert-base-uncased`). For every candidate we compute the cosine
+similarity to a task-specific target (e.g. *article sentence + answer* for
+Q-gen) and pick the top-1 / top-3.
+
+This keeps the comparison apples-to-apples:
+
+- Same val / test MCQs as Model A and Model B (default `--max-val-mcq 2011
+  --max-test-mcq 5027`, matching their `metrics_summary.json`).
+- Same candidate pool (so improvements come purely from the BERT scorer, not
+  from a new candidate generator).
+- Same BLEU / ROUGE / METEOR metrics, written to a `metrics_summary.json`
+  with the same structure used by Model A / Model B.
+
+```bash
+pip install -r requirements.txt   # installs torch (CPU) + transformers
+python -m src.model_bert_train \
+    --processed-dir data/processed \
+    --output-dir models/model_bert \
+    --model-name bert-base-uncased \
+    --max-val-mcq 2011 --max-test-mcq 5027
+```
+
+Useful options:
+
+- `--model-name distilbert-base-uncased` — roughly 2× faster on CPU.
+- `--distractor-candidate-cap 30` — top-N most frequent tokens per MCQ to
+  rerank (keeps full val/test tractable on CPU).
+- `--batch-size 32`, `--max-length 128`, `--device cuda` (auto-detected),
+  `--fp16` (GPU only), `--cache-dir <path>` (HF cache).
+- Per-task flags: `--skip-question-generation`, `--skip-distractors`,
+  `--skip-hints`.
+
+Outputs under `models/model_bert/`:
+
+- `metrics_summary.json`, `model_bert_meta.json`
+- `generation_*_predictions.csv` (Model A comparison)
+- `distractor_*_predictions.csv`, `hint_*_predictions.csv` (Model B comparison)
+
+A combined `models/comparison_summary.json` is also written, with one block
+per task (`question_generation`, `distractor_generation`, `hint_generation`),
+each containing `validation` and `test` for both the classical model and BERT.
+`notebooks/experiments.ipynb` renders this as side-by-side tables.
+
 ## Next steps
 
 - `ui/app.py` — Streamlit UI integrating Model A + Model B

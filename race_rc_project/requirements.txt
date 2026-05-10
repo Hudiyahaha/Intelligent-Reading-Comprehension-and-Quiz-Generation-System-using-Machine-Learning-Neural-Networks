@@ -10,6 +10,12 @@ pytest>=7.4.0,<10
 nltk>=3.8.1,<4
 rouge-score>=0.1.2,<1
 
+# BERT comparison baseline (Model A / Model B rerank). Install torch from the
+# CPU index when no GPU is available:
+#   pip install "torch==2.*" --index-url https://download.pytorch.org/whl/cpu
+torch>=2.0,<3
+transformers>=4.41,<5
+
 # UI & notebooks (install when needed)
 streamlit>=1.28.0,<2
 jupyter>=1.0.0,<2
